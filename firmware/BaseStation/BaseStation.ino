@@ -97,7 +97,7 @@
 
 //-------------------------------------------------------------------
 
-struct __attribute__((packed)) Configuration {
+struct __attribute__((packed)) BaseConfiguration {
     uint8_t stationNumber;
 // Active Mode duration
 //    (xxx) - 2^(bit2:bit0) hours in Active Mode (1 - 32 hours)
@@ -110,10 +110,14 @@ struct __attribute__((packed)) Configuration {
     uint8_t oldFastPunchMode: 1; // Deprecated
     uint8_t enableFastPunchForCard: 1; // Enable fast punch for card when clear
     uint8_t antennaGain: 3;
-    //uint8_t writeProtection: 1; // Enable write protection by password
-    //uint8_t readProtection: 1; // Enable read protection by password
     uint8_t _reserved2: 5;
     uint8_t password[3];
+};
+
+struct __attribute__((packed)) Configuration {
+    BaseConfiguration base;
+// vX.11 and later
+    uint8_t ntagAuthPassword[4];
 };
 
 
@@ -285,6 +289,7 @@ void processSleepMasterCard(byte *data, byte dataSize);
 void processBackupMasterCardWithTimestamps(byte *data, byte dataSize);
 void processSettingsMasterCard(byte *data, byte dataSize);
 void processPasswordMasterCard(byte *data, byte dataSize);
+void processAuthPasswordMasterCard(byte *data, byte dataSize);
 void processStateMasterCard(byte *data, byte dataSize);
 void processParticipantCard(uint16_t cardNum);
 bool writePunchToParticipantCard(uint8_t newPage, bool fastPunch);
@@ -351,14 +356,16 @@ void setup() {
     // Read settings from EEPROM
     readConfig(&config, sizeof(Configuration), EEPROM_CONFIG_ADDR);
 
-    if(config.stationNumber == 0 || config.stationNumber == 0xff ||
-       config.antennaGain > MAX_ANTENNA_GAIN || config.antennaGain < MIN_ANTENNA_GAIN) {
+    if(config.base.stationNumber == 0 || config.base.stationNumber == 0xff ||
+       config.base.antennaGain > MAX_ANTENNA_GAIN || config.base.antennaGain < MIN_ANTENNA_GAIN) {
         memset(&config, 0, sizeof(Configuration));
 
-        config.stationNumber = DEFAULT_STATION_NUM;
-        config.antennaGain = DEFAULT_ANTENNA_GAIN;
-        config.activeModeDuration = DEFAULT_ACTIVE_MODE_DURATION;
-        config.password[0] = config.password[1] = config.password[2] = 0;
+        config.base.stationNumber = DEFAULT_STATION_NUM;
+        config.base.antennaGain = DEFAULT_ANTENNA_GAIN;
+        config.base.activeModeDuration = DEFAULT_ACTIVE_MODE_DURATION;
+        for (uint8_t i = 0; i < 4; ++i) {
+            config.ntagAuthPassword[i] = 0xFF;
+        }
         writeConfig(&config, sizeof(Configuration), EEPROM_CONFIG_ADDR);
 #ifdef USE_I2C_EEPROM
         i2cEepromErase();
@@ -368,8 +375,8 @@ void setup() {
     setModeIfAllowed(DEFAULT_MODE);
   
     serialProto.init(SERIAL_MSG_START);
-    rfid.init(RC522_SS, RC522_RST, config.antennaGain);
-    rfid.setPassword(config.password);
+    rfid.init(RC522_SS, RC522_RST, config.base.antennaGain);
+    rfid.setAuthPassword(config.ntagAuthPassword);
 
     delay(500);
 
@@ -418,9 +425,9 @@ void loop() {
             digitalWrite(LED,HIGH);
 #endif
 
-            if(config.activeModeDuration == SETTINGS_ALWAYS_ACTIVE) {
+            if(config.base.activeModeDuration == SETTINGS_ALWAYS_ACTIVE) {
                   workTimer = 0;
-            } else if(workTimer >= (1<<(uint32_t)config.activeModeDuration)*3600000UL) {
+            } else if(workTimer >= (1<<(uint32_t)config.base.activeModeDuration)*3600000UL) {
                 setModeIfAllowed(MODE_WAIT);
             }
             break;
@@ -432,11 +439,11 @@ void loop() {
             digitalWrite(LED,HIGH);
 #endif
 
-            if(config.activeModeDuration == SETTINGS_ALWAYS_WAIT) {
+            if(config.base.activeModeDuration == SETTINGS_ALWAYS_WAIT) {
                 workTimer = 0;
             }
 
-            if(config.autosleep && workTimer > AUTOSLEEP_TIME) {
+            if(config.base.autosleep && workTimer > AUTOSLEEP_TIME) {
                 setModeIfAllowed(MODE_SLEEP);
             }
             break;
@@ -466,15 +473,16 @@ void loop() {
     processSerial();
 }
 
-void setNewConfig(Configuration *newConfig) {
+void setNewConfig(BaseConfiguration *newConfig) {
     if(newConfig->stationNumber == 0) {
-        newConfig->stationNumber = config.stationNumber;
+        newConfig->stationNumber = config.base.stationNumber;
     }
     if(newConfig->antennaGain > MAX_ANTENNA_GAIN || newConfig->antennaGain < MIN_ANTENNA_GAIN) {
-        newConfig->antennaGain = config.antennaGain;
+        newConfig->antennaGain = config.base.antennaGain;
     }
 
-    memcpy(&config, newConfig, sizeof(Configuration));
+    // Copy new config without NTAG auth password 
+    memcpy(&(config.base), newConfig, sizeof(BaseConfiguration));
     writeConfig(&config, sizeof(Configuration), EEPROM_CONFIG_ADDR);
 }
 
@@ -483,7 +491,7 @@ void setStationNum(uint8_t num) {
         return;
     }
 
-    config.stationNumber = num;
+    config.base.stationNumber = num;
 }
 
 void setTime(int16_t year, uint8_t mon, uint8_t day, uint8_t hour, uint8_t mi, uint8_t sec) {
@@ -608,9 +616,9 @@ void setMode(uint8_t newMode) {
 
 void setModeIfAllowed(uint8_t newMode) {
     // Check mode with settings
-    if(config.activeModeDuration == SETTINGS_ALWAYS_WAIT) {
+    if(config.base.activeModeDuration == SETTINGS_ALWAYS_WAIT) {
         setMode(MODE_WAIT);
-    } else if(config.activeModeDuration == SETTINGS_ALWAYS_ACTIVE) {
+    } else if(config.base.activeModeDuration == SETTINGS_ALWAYS_ACTIVE) {
         setMode(MODE_ACTIVE);
     } else {
         setMode(newMode);
@@ -884,7 +892,7 @@ void processRfid() {
 #endif
     reedSwitchFlag = 0;
 
-    rfid.begin(config.antennaGain);
+    rfid.begin(config.base.antennaGain);
     processCard();
     rfid.end();
 }
@@ -907,7 +915,7 @@ void processCard() {
     } else {
         setModeIfAllowed(MODE_ACTIVE);
         // Process a participant card
-        switch(config.stationNumber) {
+        switch(config.base.stationNumber) {
             case CLEAR_STATION_NUM:
                 clearParticipantCard();
                 break;
@@ -944,9 +952,9 @@ void processMasterCard(uint8_t pageInitData[]) {
     }
 
     // Check password
-    if( (config.password[0] != masterCardData[4]) ||
-            (config.password[1] != masterCardData[5]) ||
-            (config.password[2] != masterCardData[6]) ) {
+    if( (config.base.password[0] != masterCardData[4]) ||
+            (config.base.password[1] != masterCardData[5]) ||
+            (config.base.password[2] != masterCardData[6]) ) {
         beepPassError();
         return;
     }
@@ -974,6 +982,9 @@ void processMasterCard(uint8_t pageInitData[]) {
             break;
         case MASTER_CARD_STATE:
             processStateMasterCard(masterCardData, sizeof(masterCardData));
+            break;
+        case MASTER_CARD_AUTH_PASSWORD:
+            processAuthPasswordMasterCard(masterCardData, sizeof(masterCardData));
             break;
         default:
             beepMasterCardReadError();
@@ -1011,7 +1022,7 @@ void processStationMasterCard(byte *data, byte dataSize) {
     uint8_t newNum = data[8];
 
     if(newNum > 0) {
-        if(config.stationNumber != newNum) {
+        if(config.base.stationNumber != newNum) {
             setStationNum(newNum);
             writeConfig(&config, sizeof(Configuration), EEPROM_CONFIG_ADDR);
         }
@@ -1044,14 +1055,14 @@ void processBackupMasterCardWithTimestamps(byte *data, byte dataSize) {
 
     byte pageData[4];
     memcpy(pageData, data, 4);
-    pageData[0] = config.stationNumber;
+    pageData[0] = config.base.stationNumber;
     pageData[3] = FW_MAJOR_VERS;
     bool result = rfid.cardPageWrite(CARD_PAGE_INIT, pageData);
 
     uint8_t maxPage = rfid.getCardMaxPage();
     uint8_t stationNumberFromCard = data[0];
     uint16_t lastRecordAddressFromCard = 0xffff;
-    if (stationNumberFromCard == config.stationNumber) {
+    if (stationNumberFromCard == config.base.stationNumber) {
         result &= rfid.cardPageRead(CARD_PAGE_INFO1, pageData);
         byte lastPageData[4];
         result &= rfid.cardPageRead(maxPage, lastPageData);
@@ -1149,15 +1160,25 @@ void processSettingsMasterCard(byte *data, byte dataSize) {
         return;
     }
 
-    setNewConfig((Configuration*)&data[8]);
+    setNewConfig((BaseConfiguration*)&data[8]);
 
     beepMasterCardOk();
 }
 
 void processPasswordMasterCard(byte *data, byte dataSize) {
-    config.password[0] = data[8];
-    config.password[1] = data[9];
-    config.password[2] = data[10];
+    config.base.password[0] = data[8];
+    config.base.password[1] = data[9];
+    config.base.password[2] = data[10];
+    writeConfig(&config, sizeof(Configuration), EEPROM_CONFIG_ADDR);
+    beepMasterCardOk();
+}
+
+void processAuthPasswordMasterCard(byte *data, byte dataSize) {
+    config.ntagAuthPassword[0] = data[8];
+    config.ntagAuthPassword[1] = data[9];
+    config.ntagAuthPassword[2] = data[10];
+    config.ntagAuthPassword[3] = data[11];
+    rfid.setAuthPassword(config.ntagAuthPassword);
     writeConfig(&config, sizeof(Configuration), EEPROM_CONFIG_ADDR);
     beepMasterCardOk();
 }
@@ -1174,7 +1195,7 @@ void processStateMasterCard(byte *data, byte dataSize) {
     digitalWrite(LED, HIGH);
     byte batteryByte = batteryVoltageToByte(measureBatteryVoltage(true));
     digitalWrite(LED, LOW);
-    rfid.begin(config.antennaGain);
+    rfid.begin(config.base.antennaGain);
 #else
     byte batteryByte = checkBattery(false);
 #endif
@@ -1188,8 +1209,10 @@ void processStateMasterCard(byte *data, byte dataSize) {
     pageData[3] = 0;
     bool result = rfid.cardPageWrite(page++, pageData);
 
-    // Write station config
-    result &= rfid.cardPageWrite(page++, (byte*)&config);
+    // Write first 3 bytes of station config (without passwords)
+    memcpy(pageData, &config, 3);
+    pageData[3] = 0;
+    result &= rfid.cardPageWrite(page++, pageData);
 
     // Write station state
     pageData[0] = batteryByte;
@@ -1268,14 +1291,14 @@ void processParticipantCard(uint16_t cardNum) {
         return;
     }
 
-    if(lastNum != config.stationNumber) {
-        if(config.checkNoPunchesBeforeStart
-                && config.stationNumber == START_STATION_NUM
+    if(lastNum != config.base.stationNumber) {
+        if(config.base.checkNoPunchesBeforeStart
+                && config.base.stationNumber == START_STATION_NUM
                 && newPage > CARD_PAGE_START) {
             return;
         }
 
-        if(config.checkCardInitTime && !checkCardInitTime()) {
+        if(config.base.checkCardInitTime && !checkCardInitTime()) {
             return;
         }
 
@@ -1295,7 +1318,7 @@ bool writePunchToParticipantCard(uint8_t newPage, bool fastPunch) {
     
     DS3231_get(&t);
 
-    pageData[0] = config.stationNumber;
+    pageData[0] = config.base.stationNumber;
     pageData[1] = (t.unixtime & 0x00FF0000)>>16;
     pageData[2] = (t.unixtime & 0x0000FF00)>>8;
     pageData[3] = (t.unixtime & 0x000000FF);
@@ -1303,7 +1326,7 @@ bool writePunchToParticipantCard(uint8_t newPage, bool fastPunch) {
     bool result = rfid.cardPageWrite(newPage, pageData);
 
     if(fastPunch && result) {
-        pageData[0] = config.stationNumber;
+        pageData[0] = config.base.stationNumber;
         pageData[1] = newPage;
         pageData[2] = 0;
         pageData[3] = FAST_PUNCH_SIGN;
@@ -1365,8 +1388,8 @@ void clearParticipantCard() {
 
         result &= rfid.cardPageWrite(CARD_PAGE_INIT_TIME, pageData);
 
-        if(config.enableFastPunchForCard) {
-            pageData[0] = config.stationNumber;
+        if(config.base.enableFastPunchForCard) {
+            pageData[0] = config.base.stationNumber;
             pageData[1] = 0;
             pageData[2] = 0;
             pageData[3] = FAST_PUNCH_SIGN;
@@ -1421,7 +1444,7 @@ bool checkCardInitTime() {
         return false;
     }
 
-    if(config.checkCardInitTime) {
+    if(config.base.checkCardInitTime) {
         DS3231_get(&t);
         if(t.unixtime - cardTime > CARD_EXPIRE_TIME) {
             return false;
@@ -1489,7 +1512,7 @@ void serialFuncReadInfo(byte *data, byte dataSize) {
     serialProto.add(HW_VERS);
     serialProto.add(FW_MAJOR_VERS);
     serialProto.add(FW_MINOR_VERS);
-    serialProto.add((uint8_t*)&config, sizeof(Configuration));
+    serialProto.add((uint8_t*)&(config.base), sizeof(BaseConfiguration));
 
 #if defined(ADC_IN) && defined(ADC_ENABLE)
     serialProto.add(batteryVoltageToByte(measureBatteryVoltage(true)));
@@ -1530,7 +1553,7 @@ void serialFuncWriteSettings(byte *data, byte dataSize) {
         return;
     }
 
-    setNewConfig((Configuration*)&data[3]);
+    setNewConfig((BaseConfiguration*)&data[3]);
 
     setTime(data[9] + 2000, data[10], data[11], data[12], data[13], data[14]);
     setWakeupTime(data[15] + 2000, data[16], data[17], data[18], data[19], data[20]);

@@ -13,6 +13,7 @@ enum StationNum {
 };
 
 enum MasterCard {
+    MASTER_CARD_AUTH_PASSWORD = 248,
     MASTER_CARD_STATE         = 249,
     MASTER_CARD_SET_TIME      = 250,
     MASTER_CARD_SET_NUMBER    = 251,
